@@ -1,0 +1,27 @@
+# 학생연구원 데이터/코드 전체
+학생연구원_이윤석교수님/
+
+# CSV 전체
+*.csv
+
+# 원본 의료영상
+*.dcm
+*.nii
+*.nii.gz
+
+# ZIP
+*.zip
+
+# AutoML 모델
+AutogluonModels/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Temporary files
+*.swp
+*.swo
