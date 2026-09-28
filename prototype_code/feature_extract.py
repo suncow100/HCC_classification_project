@@ -7,20 +7,40 @@ from pathlib import Path
 from PIL import Image
 from radiomics import featureextractor
 
-MANIFEST_CSV = "/home/jovyan/gcubme/SW_BAEK/HCC/dataset_manifest_portal_only.csv"
-OUT_CSV = "/home/jovyan/gcubme/SW_BAEK/HCC/radiomics_features_portal.csv"
+MANIFEST_CSV = "/home/jovyan/gcubme/SW_BAEK/HCC/dataset_manifest_with_mask.csv"
+OUT_CSV = "/home/jovyan/gcubme/SW_BAEK/HCC/radiomics_features_multiphase.csv"
 
 UID_PATTERN = re.compile(r"(\d+(?:\.\d+){3,})")
+
+# --- phase 판별 정규식 (오타 포함, 검증 완료된 규칙) ---
+ARTERIAL_PATTERN = r"arteri|artery|aterial|artey|aretrial"
+DELAY_PATTERN = r"delay|\d+\s*min\b"
 
 def extract_uid(filename: str):
     m = UID_PATTERN.search(filename)
     return m.group(1) if m else None
 
+def get_series_description(series_path: Path) -> str:
+    first_dcm = next(series_path.glob("*.dcm"), None)
+    if first_dcm is None:
+        return ""
+    ds = pydicom.dcmread(str(first_dcm), stop_before_pixels=True)
+    return getattr(ds, "SeriesDescription", "") or ""
+
+def classify_phase(desc: str) -> str:
+    if re.search(ARTERIAL_PATTERN, desc, re.IGNORECASE):
+        return "arterial"
+    if (re.search(r"portal|veno|\bpvp\b", desc, re.IGNORECASE)
+            and not re.search(ARTERIAL_PATTERN + "|delay", desc, re.IGNORECASE)):
+        return "portal"
+    if re.search(DELAY_PATTERN, desc, re.IGNORECASE) and not re.search(ARTERIAL_PATTERN, desc, re.IGNORECASE):
+        return "delay"
+    return "other"
+
 def load_series_with_mask(series_path: Path, mask_path: Path):
     dcm_files = sorted(series_path.glob("*.dcm"))
     if not dcm_files:
         return None, None
-
     slices = [(pydicom.dcmread(str(f)), extract_uid(f.name)) for f in dcm_files]
 
     def sort_key(item):
@@ -35,7 +55,7 @@ def load_series_with_mask(series_path: Path, mask_path: Path):
     img_slices, mask_slices = [], []
     for ds, uid in slices:
         if uid not in mask_uid_map:
-            return None, None  # UID 매칭 실패 -> 이 시리즈는 스킵
+            return None, None
         img_slices.append(ds.pixel_array.astype(np.float32))
         mask_img = np.array(Image.open(mask_uid_map[uid]))
         mask_slices.append((mask_img > 0).astype(np.uint8))
@@ -61,34 +81,53 @@ def load_series_with_mask(series_path: Path, mask_path: Path):
 
 def main():
     df = pd.read_csv(MANIFEST_CSV)
+
+    print("phase 분류 중...")
+    df["series_description"] = df["series_path"].apply(lambda p: get_series_description(Path(p)))
+    df["phase"] = df["series_description"].apply(classify_phase)
+
+    n_other = (df["phase"] == "other").sum()
+    print(f"phase='other'로 남은 시리즈: {n_other}개 (0이어야 정상)")
+
+    df = df[df["phase"] != "other"].reset_index(drop=True)
+    print(f"피처 추출 대상 시리즈: {len(df)}개 (환자 수: {df['patient_id'].nunique()}명)")
+
     extractor = featureextractor.RadiomicsFeatureExtractor()
 
     results = []
     for i, row in df.iterrows():
         try:
-            image_sitk, mask_sitk = load_series_with_mask(Path(row["series_path"]), Path(row["mask_path"]))
+            image_sitk, mask_sitk = load_series_with_mask(
+                Path(row["series_path"]), Path(row["mask_path"])
+            )
             if image_sitk is None:
-                print(f"[스킵-UID불일치] {row['patient_id']}")
+                print(f"[스킵-UID불일치] {row['patient_id']} ({row['phase']})")
                 continue
             if sitk.GetArrayFromImage(mask_sitk).sum() == 0:
-                print(f"[스킵-빈마스크] {row['patient_id']}")
+                print(f"[스킵-빈마스크] {row['patient_id']} ({row['phase']})")
                 continue
 
             fv = extractor.execute(image_sitk, mask_sitk)
             feat = {k: v for k, v in fv.items() if not k.startswith("diagnostics_")}
             feat.update({
                 "patient_id": row["patient_id"],
+                "category": row["category"],
                 "class": row["class"],
                 "binary_label": row["binary_label"],
+                "phase": row["phase"],
                 "series_path": row["series_path"],
             })
             results.append(feat)
-            print(f"[{i+1}/{len(df)}] {row['patient_id']} ({row['class']}) 완료")
+            print(f"[{i+1}/{len(df)}] {row['patient_id']} ({row['class']}, {row['phase']}) 완료")
         except Exception as e:
-            print(f"[에러] {row['patient_id']}: {e}")
+            print(f"[에러] {row['patient_id']} ({row['phase']}): {e}")
 
-    pd.DataFrame(results).to_csv(OUT_CSV, index=False, encoding="utf-8-sig")
-    print(f"\n피처 추출 완료 -> {OUT_CSV}")
+    out_df = pd.DataFrame(results)
+    out_df.to_csv(OUT_CSV, index=False, encoding="utf-8-sig")
+    print(f"\n피처 추출 완료: {len(out_df)}개 시리즈 -> {OUT_CSV}")
+    print(f"환자 수: {out_df['patient_id'].nunique()}명")
+    print("\nphase별 시리즈 수:")
+    print(out_df["phase"].value_counts())
 
 if __name__ == "__main__":
     main()

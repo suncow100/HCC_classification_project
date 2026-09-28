@@ -20,14 +20,24 @@ def get_series_description(series_path):
 df["series_description"] = df["series_path"].apply(get_series_description)
 desc = df["series_description"]
 
-# 이전에 검증한 키워드 규칙 그대로 사용
-is_arterial = desc.str.contains(r"arteri|artery", case=False, regex=True)
+# --- phase 판별 정규식 ---
+# arterial: 정상 표기(arteri/artery) + 실제 발견된 오타(aterial, artey, aretrial)
+ARTERIAL_PATTERN = r"arteri|artery|aterial|artey|aretrial"
+# delay: 정상 표기(delay) + "3MIN"처럼 숫자+분 단위로 지연시간을 표기하는 경우
+DELAY_PATTERN = r"delay|\d+\s*min\b"
+
+is_arterial = desc.str.contains(ARTERIAL_PATTERN, case=False, regex=True)
+
 is_portal_venous = (
     desc.str.contains("portal", case=False)
     | desc.str.contains("veno", case=False)
     | desc.str.contains(r"\bpvp\b", case=False, regex=True)
-) & ~desc.str.contains(r"arteri|artery|delay", case=False, regex=True)
-is_delay = desc.str.contains("delay", case=False) & ~desc.str.contains(r"arteri|artery", case=False, regex=True)
+) & ~desc.str.contains(ARTERIAL_PATTERN + "|delay", case=False, regex=True)
+
+is_delay = (
+    desc.str.contains(DELAY_PATTERN, case=False, regex=True)
+    & ~desc.str.contains(ARTERIAL_PATTERN, case=False, regex=True)
+)
 
 df["phase"] = "other"
 df.loc[is_arterial, "phase"] = "arterial"
@@ -63,6 +73,12 @@ print(none_matched[["patient_id", "class"]].to_string())
 
 phase_summary.to_csv(OUT_CSV, index=False, encoding="utf-8-sig")
 print(f"\n-> {OUT_CSV} 저장 완료")
+
+# phase='other'로 남은 시리즈가 있는지 최종 확인 (0개여야 정상)
+other_df = df[df["phase"] == "other"]
+print(f"\nphase='other'로 남은 시리즈 수: {len(other_df)}")
+if len(other_df) > 0:
+    print(other_df[["patient_id", "class", "series_description"]].to_string())
 
 # 참고: long format용 최종 학습 데이터는 df에서 phase="other"인 행만 제외하면 됨
 usable_series = df[df["phase"] != "other"]
